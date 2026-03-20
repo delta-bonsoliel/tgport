@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=delta
 WorkingDirectory=/home/delta/workspace/projects/tgport
+Environment=PATH=/home/delta/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=/home/delta/workspace/projects/tgport/.env
 ExecStart=/home/delta/workspace/projects/tgport/.venv/bin/python -m tgport
 Restart=on-failure
@@ -15,7 +16,7 @@ RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/home/delta/workspace
+ReadWritePaths=/home/delta/workspace /home/delta/.local/share/claude /home/delta/.claude
 MemoryMax=512M
 
 [Install]
