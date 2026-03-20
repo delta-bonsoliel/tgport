@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import os
 import time
+from datetime import datetime, timezone
 from functools import wraps
 
 from telegram import Update
@@ -83,6 +85,80 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if lock.locked():
         await update.message.reply_text("Please wait for the current response to finish.")
         return
+
+    async with lock:
+        await _process_message(update, chat_id, prompt)
+
+
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".txt", ".md", ".pdf"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+DOC_EXTENSIONS = {".txt", ".md", ".pdf"}
+
+
+def _get_download_dir(ext: str) -> str:
+    if ext in DOC_EXTENSIONS:
+        return os.path.expanduser("~/workspace/docs/downloads")
+    return config.DOWNLOAD_DIR
+
+
+@restricted
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    caption = update.message.caption or "この画像を確認してください。"
+
+    lock = _get_lock(chat_id)
+    if lock.locked():
+        await update.message.reply_text("Please wait for the current response to finish.")
+        return
+
+    photo = update.message.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+
+    download_dir = _get_download_dir(".jpg")
+    os.makedirs(download_dir, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"{ts}_{photo.file_unique_id}.jpg"
+    filepath = os.path.join(download_dir, filename)
+    await file.download_to_drive(filepath)
+
+    prompt = f"{caption}\n\n[画像ファイル: {filepath}]"
+    logger.info("Photo saved: %s", filepath)
+
+    async with lock:
+        await _process_message(update, chat_id, prompt)
+
+
+@restricted
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    caption = update.message.caption or "このファイルを確認してください。"
+    doc = update.message.document
+
+    # Check file extension
+    original_name = doc.file_name or ""
+    ext = os.path.splitext(original_name)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        allowed = ", ".join(sorted(ALLOWED_EXTENSIONS))
+        await update.message.reply_text(f"非対応のファイル形式です。対応: {allowed}")
+        return
+
+    lock = _get_lock(chat_id)
+    if lock.locked():
+        await update.message.reply_text("Please wait for the current response to finish.")
+        return
+
+    file = await context.bot.get_file(doc.file_id)
+
+    download_dir = _get_download_dir(ext)
+    os.makedirs(download_dir, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"{ts}_{original_name}" if original_name else f"{ts}_{doc.file_unique_id}{ext}"
+    filepath = os.path.join(download_dir, filename)
+    await file.download_to_drive(filepath)
+
+    label = "画像ファイル" if ext in IMAGE_EXTENSIONS else "ファイル"
+    prompt = f"{caption}\n\n[{label}: {filepath}]"
+    logger.info("Document saved: %s", filepath)
 
     async with lock:
         await _process_message(update, chat_id, prompt)
@@ -173,6 +249,8 @@ def run():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     logger.info("Bot started. Allowed users: %s", config.ALLOWED_USER_IDS)
     app.run_polling()
