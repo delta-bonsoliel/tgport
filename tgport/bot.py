@@ -93,12 +93,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".txt", ".md", ".pdf"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 DOC_EXTENSIONS = {".txt", ".md", ".pdf"}
+ALLOWED_MIMES = {
+    "image/jpeg", "image/png", "image/webp",
+    "text/plain", "text/markdown",
+    "application/pdf",
+}
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 
 def _get_download_dir(ext: str) -> str:
     if ext in DOC_EXTENSIONS:
         return os.path.expanduser("~/workspace/docs/downloads")
     return config.DOWNLOAD_DIR
+
+
+def _safe_filepath(download_dir: str, filename: str) -> str:
+    safe_name = os.path.basename(filename)
+    filepath = os.path.join(download_dir, safe_name)
+    if not os.path.abspath(filepath).startswith(os.path.abspath(download_dir)):
+        raise ValueError("Invalid filename")
+    return filepath
 
 
 @restricted
@@ -111,14 +125,21 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please wait for the current response to finish.")
         return
 
+    if not update.message.photo:
+        return
     photo = update.message.photo[-1]
+
+    if photo.file_size and photo.file_size > MAX_FILE_SIZE:
+        await update.message.reply_text(f"ファイルが大きすぎます（上限: {MAX_FILE_SIZE // 1024 // 1024}MB）")
+        return
+
     file = await context.bot.get_file(photo.file_id)
 
     download_dir = _get_download_dir(".jpg")
     os.makedirs(download_dir, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"{ts}_{photo.file_unique_id}.jpg"
-    filepath = os.path.join(download_dir, filename)
+    filepath = _safe_filepath(download_dir, filename)
     await file.download_to_drive(filepath)
 
     prompt = f"{caption}\n\n[画像ファイル: {filepath}]"
@@ -134,12 +155,19 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or "このファイルを確認してください。"
     doc = update.message.document
 
-    # Check file extension
+    # Check file extension and MIME type
     original_name = doc.file_name or ""
     ext = os.path.splitext(original_name)[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         allowed = ", ".join(sorted(ALLOWED_EXTENSIONS))
         await update.message.reply_text(f"非対応のファイル形式です。対応: {allowed}")
+        return
+    if doc.mime_type and doc.mime_type not in ALLOWED_MIMES:
+        await update.message.reply_text("非対応のファイル形式です。")
+        return
+
+    if doc.file_size and doc.file_size > MAX_FILE_SIZE:
+        await update.message.reply_text(f"ファイルが大きすぎます（上限: {MAX_FILE_SIZE // 1024 // 1024}MB）")
         return
 
     lock = _get_lock(chat_id)
@@ -152,8 +180,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     download_dir = _get_download_dir(ext)
     os.makedirs(download_dir, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    filename = f"{ts}_{original_name}" if original_name else f"{ts}_{doc.file_unique_id}{ext}"
-    filepath = os.path.join(download_dir, filename)
+    safe_name = os.path.basename(original_name) if original_name else f"{doc.file_unique_id}{ext}"
+    filename = f"{ts}_{safe_name}"
+    filepath = _safe_filepath(download_dir, filename)
     await file.download_to_drive(filepath)
 
     label = "画像ファイル" if ext in IMAGE_EXTENSIONS else "ファイル"
@@ -253,5 +282,7 @@ def run():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
+    if config.CLAUDE_SKIP_PERMISSIONS:
+        logger.warning("DANGEROUS: --dangerously-skip-permissions is enabled!")
     logger.info("Bot started. Allowed users: %s", config.ALLOWED_USER_IDS)
     app.run_polling()

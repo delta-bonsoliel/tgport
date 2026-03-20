@@ -11,5 +11,12 @@ ExecStart=/home/delta/workspace/projects/tgport/.venv/bin/python -m tgport
 Restart=on-failure
 RestartSec=5
 
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/delta/workspace
+MemoryMax=512M
+
 [Install]
 WantedBy=multi-user.target
