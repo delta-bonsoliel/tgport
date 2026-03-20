@@ -125,6 +125,15 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
                     last_edit = now
 
             elif isinstance(event, Result):
+                # Handle session-not-found errors from CLI
+                if event.is_error and any("no conversation found" in e.lower() for e in event.errors):
+                    raise SessionNotFoundError("; ".join(event.errors))
+
+                if event.is_error:
+                    error_msg = "; ".join(event.errors) if event.errors else event.text or "Unknown error"
+                    await _edit_message(bot_msg, f"Error: {error_msg}")
+                    return
+
                 # Use result text as final output if we have it
                 if event.text and not accumulated.strip(".\n "):
                     accumulated = event.text
