@@ -28,3 +28,4 @@ EDIT_INTERVAL: float = float(os.getenv("EDIT_INTERVAL", "1.5"))
 RESPONSE_TIMEOUT: int = int(os.getenv("RESPONSE_TIMEOUT", "300"))
 LOG_DIR: str = os.getenv("LOG_DIR", os.path.expanduser("~/workspace/projects/tgport/logs"))
 COST_DISPLAY: str = os.getenv("COST_DISPLAY", "dollar")  # none / dollar / yen
+LOG_RETENTION_DAYS: int = int(os.getenv("LOG_RETENTION_DAYS", "14"))

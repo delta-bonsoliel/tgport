@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 from telegram import Update
@@ -29,23 +29,64 @@ _chat_locks: dict[int, asyncio.Lock] = {}
 MAX_MSG_LEN = 4000
 MAX_MESSAGES_PER_RESPONSE = 10
 TYPING_INTERVAL = 4.0  # Telegram expires typing after ~5s
+LOG_ROTATE_CHECK_INTERVAL = 3600  # seconds
+
+_last_rotate_check: float = 0.0
 
 
-def _log_conversation(chat_id: int, user_id: int, username: str | None,
-                      prompt: str, response: str, cost_usd: float | None,
-                      tools_used: list[str]):
-    """Append a conversation entry to the JSONL log file."""
+def _rotate_logs():
+    """Rotate log files from previous days and delete backups older than 14 days."""
+    global _last_rotate_check
+    now = time.monotonic()
+    if now - _last_rotate_check < LOG_ROTATE_CHECK_INTERVAL:
+        return
+    _last_rotate_check = now
+
+    if not os.path.isdir(config.LOG_DIR):
+        return
+
+    today = datetime.now(timezone.utc).date()
+    cutoff = today - timedelta(days=config.LOG_RETENTION_DAYS)
+
+    for fname in os.listdir(config.LOG_DIR):
+        fpath = os.path.join(config.LOG_DIR, fname)
+        if not os.path.isfile(fpath):
+            continue
+
+        # Delete old backups
+        if "_bk-" in fname:
+            try:
+                date_str = fname.rsplit("_bk-", 1)[1].replace(".jsonl", "")
+                bk_date = datetime.strptime(date_str, "%Y%m%d").date()
+                if bk_date < cutoff:
+                    os.remove(fpath)
+                    logger.info("Deleted old log backup: %s", fname)
+            except (ValueError, IndexError):
+                pass
+            continue
+
+        # Rotate active logs from previous days
+        if fname.startswith("chat_") and fname.endswith(".jsonl"):
+            try:
+                mtime = datetime.fromtimestamp(os.path.getmtime(fpath), tz=timezone.utc).date()
+                if mtime < today:
+                    backup = fpath.replace(".jsonl", f"_bk-{mtime:%Y%m%d}.jsonl")
+                    os.rename(fpath, backup)
+                    logger.info("Rotated log: %s -> %s", fname, os.path.basename(backup))
+            except OSError as e:
+                logger.error("Failed to rotate log %s: %s", fname, e)
+
+
+def _log_event(chat_id: int, event_type: str, **fields):
+    """Append an event entry to the JSONL log file."""
     os.makedirs(config.LOG_DIR, exist_ok=True)
+    _rotate_logs()
     log_path = os.path.join(config.LOG_DIR, f"chat_{chat_id}.jsonl")
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "chat_id": chat_id,
-        "user_id": user_id,
-        "username": username,
-        "prompt": prompt,
-        "response": response,
-        "cost_usd": cost_usd,
-        "tools": tools_used,
+        "event": event_type,
+        **fields,
     }
     try:
         with open(log_path, "a", encoding="utf-8") as f:
@@ -259,6 +300,13 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
             name = user.full_name or user.username or str(user.id)
             prompt = f"[User: {name}]\n{prompt}"
 
+    # Log request
+    user = update.effective_user
+    _log_event(chat_id, "request",
+               user_id=user.id if user else 0,
+               username=(user.username or user.full_name) if user else None,
+               prompt=prompt)
+
     # Start typing indicator
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(_send_typing(chat_id, update.get_bot(), typing_stop))
@@ -267,12 +315,12 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
     accumulated = ""
     last_edit = 0.0
     msg_count = 1
-    tools_used: list[str] = []
     cost_usd: float | None = None
 
     try:
         async for event in stream_claude(prompt, session_id, is_new):
             if isinstance(event, TextDelta):
+                _log_event(chat_id, "text_delta", text=event.text)
                 accumulated += event.text
 
                 now = time.monotonic()
@@ -289,7 +337,7 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
                         msg_count += 1
 
             elif isinstance(event, ToolUse):
-                tools_used.append(event.tool)
+                _log_event(chat_id, "tool_use", tool=event.tool)
                 tool_indicator = f"\n<i>[{event.tool}]</i>"
                 accumulated += tool_indicator
                 now = time.monotonic()
@@ -319,6 +367,9 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
                     msg_count += 1
 
                 cost_usd = event.cost_usd
+                clean_response = re.sub(r"\n<i>\[.*?\]</i>", "", accumulated).strip()
+                _log_event(chat_id, "response",
+                           response=clean_response, cost_usd=cost_usd)
                 footer = _format_cost(event.cost_usd)
                 final = (accumulated + footer).strip() if footer else accumulated.strip()
                 await _edit_message(bot_msg, final)
@@ -338,18 +389,6 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
     finally:
         typing_stop.set()
         typing_task.cancel()
-        user = update.effective_user
-        # Strip HTML tool indicators for clean log
-        clean_response = re.sub(r"\n<i>\[.*?\]</i>", "", accumulated).strip()
-        _log_conversation(
-            chat_id=chat_id,
-            user_id=user.id if user else 0,
-            username=(user.username or user.full_name) if user else None,
-            prompt=prompt,
-            response=clean_response,
-            cost_usd=cost_usd,
-            tools_used=tools_used,
-        )
 
 
 def run():

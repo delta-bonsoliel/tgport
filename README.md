@@ -1,22 +1,25 @@
 # tgport
 
-Telegram bot wrapper for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI. Send messages to your Telegram bot and interact with Claude Code remotely.
+Telegram bot wrapper for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI.
+Telegramのボットを通じて、Claude Codeとリモートでやり取りできます。
 
-## Features
+## 機能
 
-- Claude CLI execution via Telegram messages
-- Streaming output with real-time message updates
-- Session management (conversation context is maintained per chat)
-- Access control by Telegram user ID
-- Budget and turn limits for safety
+- TelegramメッセージからClaude CLIを実行
+- ストリーミング出力（リアルタイムでメッセージを更新）
+- セッション管理（チャットごとに会話コンテキストを維持）
+- TelegramユーザーIDによるアクセス制御
+- リクエストごとの予算・ターン数制限
+- 画像・ドキュメントの送信対応
+- JSONL形式の会話ログ（自動ローテーション・自動削除）
 
-## Requirements
+## 必要なもの
 
 - Python 3.11+
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
-- Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)（インストール・認証済み）
+- Telegram Bot Token（[@BotFather](https://t.me/BotFather) から取得）
 
-## Setup
+## セットアップ
 
 ```bash
 git clone https://github.com/delta-bonsoliel/tgport.git
@@ -25,41 +28,52 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
-Copy `.env.example` to `.env` and configure:
+`.env.example` を `.env` にコピーして設定：
 
 ```bash
 cp .env.example .env
 ```
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Yes | - | Bot token from BotFather |
-| `ALLOWED_USER_IDS` | Yes | - | Comma-separated Telegram user IDs |
-| `CLAUDE_WORK_DIR` | No | `~` | Working directory for Claude CLI |
-| `CLAUDE_MAX_TURNS` | No | `3` | Max tool-use turns per request |
-| `CLAUDE_MAX_BUDGET_USD` | No | `1.0` | Max spend per request (USD) |
-| `CLAUDE_SKIP_PERMISSIONS` | No | `false` | Enable `--dangerously-skip-permissions` |
-| `EDIT_INTERVAL` | No | `1.5` | Seconds between message updates |
-| `RESPONSE_TIMEOUT` | No | `300` | Max seconds to wait for response |
+| 変数 | 必須 | デフォルト | 説明 |
+|------|------|-----------|------|
+| `TELEGRAM_BOT_TOKEN` | Yes | - | BotFatherから取得したトークン |
+| `ALLOWED_USER_IDS` | Yes | - | 許可するTelegramユーザーID（カンマ区切り） |
+| `CLAUDE_WORK_DIR` | No | `~` | Claude CLIの作業ディレクトリ |
+| `CLAUDE_MAX_TURNS` | No | `3` | リクエストあたりの最大ツール使用ターン数 |
+| `CLAUDE_MAX_BUDGET_USD` | No | `1.0` | リクエストあたりの最大コスト（USD） |
+| `CLAUDE_SKIP_PERMISSIONS` | No | `false` | `--dangerously-skip-permissions` を有効化 |
+| `EDIT_INTERVAL` | No | `1.5` | メッセージ更新の間隔（秒） |
+| `RESPONSE_TIMEOUT` | No | `300` | レスポンス待ちの最大時間（秒） |
+| `LOG_DIR` | No | `~/workspace/projects/tgport/logs` | 会話ログの保存先ディレクトリ |
+| `LOG_RETENTION_DAYS` | No | `14` | ログバックアップの保持日数 |
+| `COST_DISPLAY` | No | `dollar` | コスト表示形式（`none` / `dollar` / `yen`） |
 
-## Usage
+## 使い方
 
 ```bash
 .venv/bin/python -m tgport
 ```
 
-### Bot Commands
+### ボットコマンド
 
-- `/start` - Show help
-- `/new` - Start a new conversation (reset session)
-- Any text message - Send to Claude
+- `/start` - ヘルプを表示
+- `/new` - 新しい会話を開始（セッションをリセット）
+- テキストメッセージ - Claudeに送信
+- 画像・ドキュメント - ファイルを保存してClaudeに送信
 
-## Security
+### ログ
 
-- Only users listed in `ALLOWED_USER_IDS` can interact with the bot. Unauthorized attempts are logged.
-- `CLAUDE_SKIP_PERMISSIONS` is **off by default**. Enabling it allows Claude to execute commands without confirmation. Only use in sandboxed environments with no internet access.
-- `CLAUDE_WORK_DIR` defines the scope of file access. Set it to the minimum necessary directory.
+会話ログは `LOG_DIR` に `chat_{チャットID}.jsonl` 形式で保存されます。
 
-## License
+- 日付が変わると、前日のログは `chat_{ID}_bk-YYYYMMDD.jsonl` に自動ローテーション
+- `LOG_RETENTION_DAYS` 日以上前のバックアップは自動削除
+
+## セキュリティ
+
+- `ALLOWED_USER_IDS` に登録されたユーザーのみ操作可能。未許可のアクセスはログに記録されます。
+- `CLAUDE_SKIP_PERMISSIONS` はデフォルトで**無効**です。有効にするとClaudeが確認なしにコマンドを実行します。サンドボックス環境でのみ使用してください。
+- `CLAUDE_WORK_DIR` でファイルアクセスの範囲を定義します。必要最小限のディレクトリに設定してください。
+
+## ライセンス
 
 MIT
