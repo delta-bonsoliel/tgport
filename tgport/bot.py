@@ -87,6 +87,8 @@ _MASK_PATTERNS = [
     (re.compile(r'(?i)(' + 'Bear' + r'er\s+)\S+'), r'\1***MASKED***'),
     # AWS-style keys
     (re.compile(r'(?:AKIA|ABIA|ACCA)[A-Z0-9]{16}'), '***AWS_KEY***'),
+    # Anthropic API keys
+    (re.compile(r'sk-ant-[a-zA-Z0-9_-]{20,}'), '***ANTHROPIC_KEY***'),
 ]
 
 
@@ -376,7 +378,8 @@ async def _process_message(update: Update, chat_id: int, prompt: str):
         if is_new:
             user = update.effective_user
             if user:
-                name = user.full_name or user.username or str(user.id)
+                raw_name = user.full_name or user.username or str(user.id)
+                name = re.sub(r'[^\w\s\-.]', '', raw_name)[:50].strip() or str(user.id)
                 prompt = f"[User: {name}]\n{prompt}"
 
         # Log request
@@ -500,9 +503,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    data = query.data or ""
-    action, _, cid = data.partition(":")
-    chat_id = int(cid) if cid.isdigit() else 0
+    action = (query.data or "").strip()
+    chat_id = query.message.chat_id
 
     user = query.from_user
     if not user or user.id not in config.ALLOWED_USER_IDS:
@@ -590,8 +592,8 @@ async def _process_message_from_callback(query, chat_id: int, prompt: str):
 
                 if event.subtype == "error_max_turns":
                     keyboard = InlineKeyboardMarkup([[
-                        InlineKeyboardButton("▶ 続行", callback_data=f"continue:{chat_id}"),
-                        InlineKeyboardButton("⏹ 中断", callback_data=f"stop:{chat_id}"),
+                        InlineKeyboardButton("▶ 続行", callback_data="continue"),
+                        InlineKeyboardButton("⏹ 中断", callback_data="stop"),
                     ]])
                     await query.message.reply_text(
                         "<i>ターン上限に達しました</i>",
