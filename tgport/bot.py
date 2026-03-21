@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from functools import wraps
 
 from telegram import Update
-from telegram.constants import ParseMode
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -26,6 +26,7 @@ _chat_locks: dict[int, asyncio.Lock] = {}
 
 MAX_MSG_LEN = 4000
 MAX_MESSAGES_PER_RESPONSE = 10
+TYPING_INTERVAL = 4.0  # Telegram expires typing after ~5s
 
 
 def _get_lock(chat_id: int) -> asyncio.Lock:
@@ -193,10 +194,28 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _process_message(update, chat_id, prompt)
 
 
+async def _send_typing(chat_id: int, bot, stop_event: asyncio.Event):
+    """Send 'typing...' action repeatedly until stop_event is set."""
+    try:
+        while not stop_event.is_set():
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=TYPING_INTERVAL)
+                break
+            except asyncio.TimeoutError:
+                pass
+    except Exception:
+        pass  # Don't let typing indicator errors affect message processing
+
+
 async def _process_message(update: Update, chat_id: int, prompt: str, retry: bool = False):
     session_id, is_new = session_manager.get_or_create(chat_id)
     if retry:
         is_new = True
+
+    # Start typing indicator
+    typing_stop = asyncio.Event()
+    typing_task = asyncio.create_task(_send_typing(chat_id, update.get_bot(), typing_stop))
 
     bot_msg = await update.message.reply_text("...")
     accumulated = ""
@@ -266,6 +285,9 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
     except RuntimeError as e:
         logger.error("Claude CLI error: %s", e)
         await _edit_message(bot_msg, f"Error: {e}")
+    finally:
+        typing_stop.set()
+        typing_task.cancel()
 
 
 def run():
