@@ -95,7 +95,7 @@ def _log_event(chat_id: int, event_type: str, **fields):
         logger.error("Failed to write conversation log: %s", e)
 
 
-USD_TO_JPY = 150.0
+USD_TO_JPY = 158.0
 
 
 def _format_cost(cost_usd: float) -> str:

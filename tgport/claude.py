@@ -54,6 +54,10 @@ def _build_command(
     ]
     if config.CLAUDE_SKIP_PERMISSIONS:
         cmd.append("--dangerously-skip-permissions")
+    if config.CLAUDE_MODEL:
+        cmd += ["--model", config.CLAUDE_MODEL]
+    if config.CLAUDE_EFFORT:
+        cmd += ["--effort", config.CLAUDE_EFFORT]
     if config.CLAUDE_MAX_TURNS:
         cmd += ["--max-turns", str(config.CLAUDE_MAX_TURNS)]
     if is_new_session:
