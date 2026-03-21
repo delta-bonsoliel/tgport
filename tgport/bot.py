@@ -54,6 +54,20 @@ def _log_conversation(chat_id: int, user_id: int, username: str | None,
         logger.error("Failed to write conversation log: %s", e)
 
 
+USD_TO_JPY = 150.0
+
+
+def _format_cost(cost_usd: float) -> str:
+    mode = config.COST_DISPLAY.lower()
+    if mode == "none":
+        return ""
+    if mode == "yen":
+        yen = cost_usd * USD_TO_JPY
+        return f"\n\n<i>cost: ¥{yen:.2f}</i>"
+    # dollar (default)
+    return f"\n\n<i>cost: ${cost_usd:.4f}</i>"
+
+
 def _get_lock(chat_id: int) -> asyncio.Lock:
     if chat_id not in _chat_locks:
         _chat_locks[chat_id] = asyncio.Lock()
@@ -238,6 +252,13 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
     if retry:
         is_new = True
 
+    # Prepend user identity on first message of a session
+    if is_new:
+        user = update.effective_user
+        if user:
+            name = user.full_name or user.username or str(user.id)
+            prompt = f"[User: {name}]\n{prompt}"
+
     # Start typing indicator
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(_send_typing(chat_id, update.get_bot(), typing_stop))
@@ -298,8 +319,8 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
                     msg_count += 1
 
                 cost_usd = event.cost_usd
-                footer = f"\n\n<i>${event.cost_usd:.4f}</i>"
-                final = (accumulated + footer).strip()
+                footer = _format_cost(event.cost_usd)
+                final = (accumulated + footer).strip() if footer else accumulated.strip()
                 await _edit_message(bot_msg, final)
 
             elif isinstance(event, Error):
