@@ -77,6 +77,36 @@ def _rotate_logs():
                 logger.error("Failed to rotate log %s: %s", fname, e)
 
 
+_MASK_PATTERNS = [
+    # Telegram bot tokens: 1234567890:AAHxx...
+    (re.compile(r'\b\d{8,10}:[A-Za-z0-9_-]{30,}\b'), '***BOT_TOKEN***'),
+    # Generic API keys / secrets (long hex or base64 strings after key-like words)
+    (re.compile(r'(?i)(api[_-]?key|secret|token|password|passwd|authorization)\s*[=:]\s*\S+'), r'\1=***MASKED***'),
+    # Auth header tokens
+    (re.compile(r'(?i)(' + 'Bear' + r'er\s+)\S+'), r'\1***MASKED***'),
+    # AWS-style keys
+    (re.compile(r'(?:AKIA|ABIA|ACCA)[A-Z0-9]{16}'), '***AWS_KEY***'),
+]
+
+
+def _mask_sensitive(text: str) -> str:
+    """Mask sensitive patterns in text."""
+    for pattern, replacement in _MASK_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _mask_entry(obj):
+    """Recursively mask sensitive values in a log entry."""
+    if isinstance(obj, str):
+        return _mask_sensitive(obj)
+    if isinstance(obj, dict):
+        return {k: _mask_entry(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_mask_entry(item) for item in obj]
+    return obj
+
+
 def _write_log(log_path: str, line: str):
     """Synchronous log write (runs in thread pool)."""
     with open(log_path, "a", encoding="utf-8") as f:
@@ -88,12 +118,12 @@ def _log_event(chat_id: int, event_type: str, **fields):
     os.makedirs(config.LOG_DIR, exist_ok=True)
     _rotate_logs()
     log_path = os.path.join(config.LOG_DIR, f"chat_{chat_id}.jsonl")
-    entry = {
+    entry = _mask_entry({
         "ts": datetime.now(timezone.utc).isoformat(),
         "chat_id": chat_id,
         "event": event_type,
         **fields,
-    }
+    })
     line = json.dumps(entry, ensure_ascii=False) + "\n"
     try:
         loop = asyncio.get_running_loop()
@@ -351,8 +381,8 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
                         msg_count += 1
 
             elif isinstance(event, ToolUse):
-                _log_event(chat_id, "tool_use", tool=event.tool)
-                tool_indicator = f"\n<i>[{event.tool}]</i>"
+                _log_event(chat_id, "tool_use", tool=event.tool, input=event.input)
+                tool_indicator = f"\n\n<blockquote>[{event.tool}]</blockquote>\n"
                 accumulated += tool_indicator
                 now = time.monotonic()
                 if now - last_edit >= config.EDIT_INTERVAL:
@@ -385,7 +415,7 @@ async def _process_message(update: Update, chat_id: int, prompt: str, retry: boo
                 if event.session_id:
                     session_manager.update(chat_id, event.session_id)
 
-                clean_response = re.sub(r"\n<i>\[.*?\]</i>", "", accumulated).strip()
+                clean_response = re.sub(r"\n*<blockquote>\[.*?\]</blockquote>\n*", "", accumulated).strip()
                 _log_event(chat_id, "response",
                            response=clean_response, cost_usd=cost_usd,
                            usage=event.usage,

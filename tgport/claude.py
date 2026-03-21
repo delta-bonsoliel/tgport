@@ -22,6 +22,7 @@ class TextDelta:
 @dataclass
 class ToolUse:
     tool: str
+    input: dict | None = None
 
 
 @dataclass
@@ -70,18 +71,30 @@ def _build_command(
     return cmd
 
 
-def _parse_event(data: dict) -> StreamEvent | None:
+def _parse_event(data: dict) -> list[StreamEvent]:
+    """Parse a stream-json event into zero or more StreamEvents."""
     etype = data.get("type")
+    events: list[StreamEvent] = []
 
     if etype == "content_block_delta":
         delta = data.get("delta", {})
         if delta.get("type") == "text_delta":
-            return TextDelta(text=delta.get("text", ""))
+            events.append(TextDelta(text=delta.get("text", "")))
 
     elif etype == "content_block_start":
         cb = data.get("content_block", {})
         if cb.get("type") == "tool_use":
-            return ToolUse(tool=cb.get("name", "unknown"))
+            events.append(ToolUse(tool=cb.get("name", "unknown"), input=cb.get("input")))
+
+    elif etype == "assistant":
+        msg = data.get("message", {})
+        for block in msg.get("content", []):
+            if block.get("type") == "text":
+                text = block.get("text", "")
+                if text:
+                    events.append(TextDelta(text=text))
+            elif block.get("type") == "tool_use":
+                events.append(ToolUse(tool=block.get("name", "unknown"), input=block.get("input")))
 
     elif etype == "result":
         result = data.get("result", "")
@@ -90,9 +103,9 @@ def _parse_event(data: dict) -> StreamEvent | None:
         errors = data.get("errors", [])
         usage = data.get("modelUsage")
         sid = data.get("session_id")
-        return Result(text=result, cost_usd=cost, is_error=is_error, errors=errors, usage=usage, session_id=sid)
+        events.append(Result(text=result, cost_usd=cost, is_error=is_error, errors=errors, usage=usage, session_id=sid))
 
-    return None
+    return events
 
 
 async def stream_claude(
@@ -127,8 +140,7 @@ async def stream_claude(
                 continue
             try:
                 data = json.loads(line)
-                event = _parse_event(data)
-                if event:
+                for event in _parse_event(data):
                     if isinstance(event, Result):
                         got_result = True
                     yield event
