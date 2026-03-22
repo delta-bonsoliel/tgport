@@ -474,8 +474,8 @@ async def _process_message(update: Update, chat_id: int, prompt: str):
 
                     if event.subtype == "error_max_turns":
                         keyboard = InlineKeyboardMarkup([[
-                            InlineKeyboardButton("▶ 続行", callback_data=f"continue:{chat_id}"),
-                            InlineKeyboardButton("⏹ 中断", callback_data=f"stop:{chat_id}"),
+                            InlineKeyboardButton("▶ 続行", callback_data="continue"),
+                            InlineKeyboardButton("⏹ 中断", callback_data="stop"),
                         ]])
                         await update.message.reply_text(
                             "<i>ターン上限に達しました</i>",
