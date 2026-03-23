@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import logging
 import os
@@ -89,6 +90,8 @@ _MASK_PATTERNS = [
     (re.compile(r'(?:AKIA|ABIA|ACCA)[A-Z0-9]{16}'), '***AWS_KEY***'),
     # Anthropic API keys
     (re.compile(r'sk-ant-[a-zA-Z0-9_-]{20,}'), '***ANTHROPIC_KEY***'),
+    # Google / Gemini API keys
+    (re.compile(r'AIzaSy[A-Za-z0-9_-]{33}'), '***GEMINI_KEY***'),
 ]
 
 
@@ -145,7 +148,7 @@ def _format_tool_indicator(tool: str, input_data: dict | None) -> str:
         short = path.split("/")[-1] if "/" in path else path
         return f"[{tool}] {short}"
     if tool == "Bash":
-        cmd = input_data.get("command", "")
+        cmd = _mask_sensitive(input_data.get("command", ""))
         return f"[{tool}] {cmd[:60]}"
     if tool in ("Edit", "Write"):
         path = input_data.get("file_path", "")
@@ -170,21 +173,28 @@ def _format_tool_indicator(tool: str, input_data: dict | None) -> str:
     return f"[{tool}] {str(first_val)[:60]}"
 
 
-def _format_footer(cost_usd: float) -> str:
+def _format_token_count(n: int) -> str:
+    """Format token count: 1234 -> '1.2K', 56789 -> '56.8K'."""
+    if n >= 1000:
+        return f"{n / 1000:.1f}K"
+    return str(n)
+
+
+def _format_footer(usage: dict | None = None) -> str:
     parts = []
     # Model & effort
-    model = config.CLAUDE_MODEL or "default"
+    if usage:
+        model = next(iter(usage), config.CLAUDE_MODEL or "default")
+    else:
+        model = config.CLAUDE_MODEL or "default"
     effort = config.CLAUDE_EFFORT or "default"
     parts.append(f"{model}/{effort}")
-    # Cost
-    mode = config.COST_DISPLAY.lower()
-    if mode == "yen":
-        yen = cost_usd * config.get_usd_to_jpy()
-        parts.append(f"¥{yen:.2f}")
-    elif mode != "none":
-        parts.append(f"${cost_usd:.4f}")
-    if not parts:
-        return ""
+    # Token usage
+    if usage:
+        u = next(iter(usage.values()), {})
+        input_tok = u.get("inputTokens", 0) + u.get("cacheReadInputTokens", 0) + u.get("cacheCreationInputTokens", 0)
+        output_tok = u.get("outputTokens", 0)
+        parts.append(f"↓{_format_token_count(input_tok)} ↑{_format_token_count(output_tok)}")
     return f"\n\n<i>{' | '.join(parts)}</i>"
 
 
@@ -357,6 +367,7 @@ async def _send_typing(chat_id: int, bot, stop_event: asyncio.Event):
     """Send 'typing...' action repeatedly until stop_event is set."""
     try:
         while not stop_event.is_set():
+            logger.debug("Sending typing action to chat %d", chat_id)
             await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=TYPING_INTERVAL)
@@ -395,21 +406,29 @@ async def _process_message(update: Update, chat_id: int, prompt: str):
         typing_stop = asyncio.Event()
         typing_task = asyncio.create_task(_send_typing(chat_id, update.get_bot(), typing_stop))
 
-        bot_msg = await update.message.reply_text("...")
+        bot_msg = None
         accumulated = ""
         last_edit = 0.0
-        msg_count = 1
+        msg_count = 0
         cost_usd: float | None = None
         session_retry = False
+
+        async def _ensure_msg():
+            nonlocal bot_msg, msg_count
+            if bot_msg is None:
+                bot_msg = await update.message.reply_text("...")
+                msg_count = 1
+            return bot_msg
 
         try:
             async for event in stream_claude(prompt, session_id, is_new):
                 if isinstance(event, TextDelta):
                     _log_event(chat_id, "text_delta", text=event.text)
-                    accumulated += event.text
+                    accumulated += html.escape(event.text)
 
                     now = time.monotonic()
                     if now - last_edit >= config.EDIT_INTERVAL:
+                        await _ensure_msg()
                         display = accumulated[:MAX_MSG_LEN]
                         await _edit_message(bot_msg, display)
                         last_edit = now
@@ -424,32 +443,40 @@ async def _process_message(update: Update, chat_id: int, prompt: str):
                 elif isinstance(event, ToolUse):
                     _log_event(chat_id, "tool_use", tool=event.tool, input=event.input)
                     tool_detail = _format_tool_indicator(event.tool, event.input)
-                    tool_indicator = f"\n<blockquote>{tool_detail}</blockquote>\n"
-                    accumulated += tool_indicator
+                    prefix = "" if accumulated.endswith("\n") or not accumulated else "\n"
+                    accumulated += f"{prefix}<blockquote>{html.escape(tool_detail)}</blockquote>\n"
                     now = time.monotonic()
                     if now - last_edit >= config.EDIT_INTERVAL:
+                        await _ensure_msg()
                         await _edit_message(bot_msg, accumulated[:MAX_MSG_LEN])
                         last_edit = now
 
                 elif isinstance(event, Result):
+                    typing_stop.set()
+
                     # Handle session-not-found errors from CLI
                     if event.is_error and any("no conversation found" in e.lower() for e in event.errors):
                         if attempt < max_retries:
+                            await _ensure_msg()
                             await _edit_message(bot_msg, "Session not found, starting new...")
                             session_retry = True
                             break
                         else:
+                            await _ensure_msg()
                             await _edit_message(bot_msg, "Error: Failed to start Claude session.")
                             return
 
                     if event.is_error:
                         error_msg = "; ".join(event.errors) if event.errors else event.text or "Unknown error"
+                        await _ensure_msg()
                         await _edit_message(bot_msg, f"Error: {error_msg}")
                         return
 
                     # Use result text as final output if we have it
                     if event.text and not accumulated.strip(".\n "):
-                        accumulated = event.text
+                        accumulated = html.escape(event.text)
+
+                    await _ensure_msg()
 
                     # Split remaining text into messages
                     while len(accumulated) > MAX_MSG_LEN and msg_count < MAX_MESSAGES_PER_RESPONSE:
@@ -468,7 +495,7 @@ async def _process_message(update: Update, chat_id: int, prompt: str):
                                usage=event.usage,
                                session_id=event.session_id,
                                subtype=event.subtype)
-                    footer = _format_footer(event.cost_usd)
+                    footer = _format_footer(event.usage)
                     final = (accumulated + footer).strip() if footer else accumulated.strip()
                     await _edit_message(bot_msg, final)
 
@@ -484,6 +511,7 @@ async def _process_message(update: Update, chat_id: int, prompt: str):
                         )
 
                 elif isinstance(event, Error):
+                    await _ensure_msg()
                     await _edit_message(bot_msg, f"Error: {event.message}")
 
         except RuntimeError as e:
@@ -536,19 +564,27 @@ async def _process_message_from_callback(query, chat_id: int, prompt: str):
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(_send_typing(chat_id, query.get_bot(), typing_stop))
 
-    bot_msg = await query.message.reply_text("...")
+    bot_msg = None
     accumulated = ""
     last_edit = 0.0
-    msg_count = 1
+    msg_count = 0
     cost_usd: float | None = None
+
+    async def _ensure_msg():
+        nonlocal bot_msg, msg_count
+        if bot_msg is None:
+            bot_msg = await query.message.reply_text("...")
+            msg_count = 1
+        return bot_msg
 
     try:
         async for event in stream_claude(prompt, session_id, is_new):
             if isinstance(event, TextDelta):
                 _log_event(chat_id, "text_delta", text=event.text)
-                accumulated += event.text
+                accumulated += html.escape(event.text)
                 now = time.monotonic()
                 if now - last_edit >= config.EDIT_INTERVAL:
+                    await _ensure_msg()
                     await _edit_message(bot_msg, accumulated[:MAX_MSG_LEN])
                     last_edit = now
                     if len(accumulated) > MAX_MSG_LEN and msg_count < MAX_MESSAGES_PER_RESPONSE:
@@ -560,20 +596,28 @@ async def _process_message_from_callback(query, chat_id: int, prompt: str):
             elif isinstance(event, ToolUse):
                 _log_event(chat_id, "tool_use", tool=event.tool, input=event.input)
                 tool_detail = _format_tool_indicator(event.tool, event.input)
-                accumulated += f"\n<blockquote>{tool_detail}</blockquote>\n"
+                prefix = "" if accumulated.endswith("\n") or not accumulated else "\n"
+                accumulated += f"{prefix}<blockquote>{html.escape(tool_detail)}</blockquote>\n"
                 now = time.monotonic()
                 if now - last_edit >= config.EDIT_INTERVAL:
+                    await _ensure_msg()
                     await _edit_message(bot_msg, accumulated[:MAX_MSG_LEN])
                     last_edit = now
 
             elif isinstance(event, Result):
+                typing_stop.set()
+
                 if event.is_error and any("no conversation found" in e.lower() for e in event.errors):
                     raise SessionNotFoundError("; ".join(event.errors))
                 if event.is_error:
+                    await _ensure_msg()
                     await _edit_message(bot_msg, f"Error: {'; '.join(event.errors) or event.text or 'Unknown error'}")
                     return
                 if event.text and not accumulated.strip(".\n "):
-                    accumulated = event.text
+                    accumulated = html.escape(event.text)
+
+                await _ensure_msg()
+
                 while len(accumulated) > MAX_MSG_LEN and msg_count < MAX_MESSAGES_PER_RESPONSE:
                     await _edit_message(bot_msg, accumulated[:MAX_MSG_LEN])
                     accumulated = accumulated[MAX_MSG_LEN:]
@@ -586,7 +630,7 @@ async def _process_message_from_callback(query, chat_id: int, prompt: str):
                 clean_response = re.sub(r"\n*<blockquote>.*?</blockquote>\n*", "", accumulated, flags=re.DOTALL).strip()
                 _log_event(chat_id, "response", response=clean_response, cost_usd=cost_usd,
                            usage=event.usage, session_id=event.session_id, subtype=event.subtype)
-                footer = _format_footer(event.cost_usd)
+                footer = _format_footer(event.usage)
                 final = (accumulated + footer).strip() if footer else accumulated.strip()
                 await _edit_message(bot_msg, final)
 
